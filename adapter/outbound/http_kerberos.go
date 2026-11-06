@@ -21,7 +21,7 @@ const (
 )
 
 func (h *Http) kerberosHandshake(ctx context.Context, conn net.Conn, br *bufio.Reader, metadata *C.Metadata) error {
-	client, err := h.newKerberosClient(h.option.KerberosSPN)
+	client, err := h.newKerberosClient(ctx, h.option.KerberosSPN)
 	if err != nil {
 		return fmt.Errorf("HTTP Kerberos: %w", err)
 	}

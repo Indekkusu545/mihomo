@@ -3,6 +3,7 @@
 package kerberos
 
 import (
+	"context"
 	"errors"
 	"strings"
 )
@@ -16,12 +17,25 @@ type Client interface {
 	Close() error
 }
 
-// NewClient uses the current process identity; it never prompts for credentials.
+// NewClient uses system credentials without prompting. On macOS, a root service
+// without credentials can use the active console user's session through a helper.
 func NewClient(spn string) (Client, error) {
+	return NewClientContext(context.Background(), spn)
+}
+
+// NewClientContext also ties any authentication helper to the caller's context.
+func NewClientContext(ctx context.Context, spn string) (Client, error) {
 	if err := ValidateSPN(spn); err != nil {
 		return nil, err
 	}
-	return newClient(spn)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	client, err := newClient(spn)
+	if err != nil {
+		return fallbackConsoleClient(ctx, spn, err)
+	}
+	return client, nil
 }
 
 func ValidateSPN(spn string) error {

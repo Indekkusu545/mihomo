@@ -202,9 +202,17 @@ func (c *gssClient) Close() error {
 	return errors.Join(errs...)
 }
 
+type gssStatusError struct {
+	error
+	major uint32
+}
+
 func (g *gssAPI) statusError(operation string, major, minor uint32) error {
 	var messages []string
 	for i, code := range []uint32{major, minor} {
+		if code == 0 {
+			continue
+		}
 		var messageContext uint32
 		for n := 0; n < 8; n++ {
 			var status uint32
@@ -219,5 +227,8 @@ func (g *gssAPI) statusError(operation string, major, minor uint32) error {
 			}
 		}
 	}
-	return fmt.Errorf("%s (GSS 0x%x/0x%x): %s", operation, major, minor, strings.Join(messages, "; "))
+	return &gssStatusError{
+		error: fmt.Errorf("%s (GSS 0x%x/0x%x): %s", operation, major, minor, strings.Join(messages, "; ")),
+		major: major,
+	}
 }

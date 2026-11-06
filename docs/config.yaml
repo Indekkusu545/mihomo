@@ -402,7 +402,7 @@ proxies: # socks5
     # kerberos-spn: HTTP/proxy.example.com # 可选，默认 HTTP/<server>，不使用目标网站或 SNI
     # kerberos-mutual-auth: true # 默认 false，允许代理在 CONNECT 成功时省略最终令牌；true 要求完成双向认证
     # Windows 使用 SSPI；macOS 使用系统 GSS.framework；Linux 需使用 with_gssapi 构建标签并安装 GSS-API 库
-    # 系统身份须已有可用的 Kerberos 凭据；以服务运行时使用服务账户身份。详细说明见 docs/kerberos.md
+    # 系统身份须已有可用的 Kerberos 凭据；macOS root 服务缺少凭据时尝试前台登录用户。详细说明见 docs/kerberos.md
     # tls: true # https
     # skip-cert-verify: true
     # name-cert-verify: example.com # 仅修改证书 DNSName 校验目标，不修改 SNI

@@ -28,11 +28,23 @@ proxies:
 | macOS（amd64、arm64） | 系统 GSS.framework | 当前账户已通过系统登录、企业 SSO 或 `kinit` 获取 Kerberos 凭据 |
 | Linux（amd64、arm64） | 系统 GSS-API | 使用 `with_gssapi` 构建，安装 GSS-API 运行库，并准备好当前账户的 Kerberos 凭据 |
 
-「系统身份」是 mihomo 进程的身份。以 Windows 服务、后台守护进程或容器运行时，不会自动使用桌面登录用户的身份。系统认证库负责访问默认凭据存储，因此可使用系统支持的 FILE、KCM、KEYRING 等缓存，而不局限于 ccache 文件。
+默认使用 mihomo 进程可访问的系统凭据。Windows 服务、Linux 后台守护进程或容器不会自动使用桌面登录用户的身份。macOS 的 root 服务在缺少凭据时，可通过独立认证助手使用前台登录用户的身份，具体条件见下节。系统认证库负责访问默认凭据存储，因此可使用系统支持的 FILE、KCM、KEYRING 等缓存，而不局限于 ccache 文件。
 
 在 macOS 或 Linux 上，可在运行 mihomo 的账户下执行 `kinit user@EXAMPLE.COM`，并通过 `klist` 检查票据。`KRB5_CONFIG`、`KRB5CCNAME` 等环境变量由系统 Kerberos 实现解释；如需使用这些变量，应在启动 mihomo 前设置。mihomo 将票据获取和缓存管理交给系统认证库，不直接执行 `kinit` 或管理续期任务。
 
 Kerberos 的 DNS 查询、KDC 连接和凭据选择由操作系统处理，不经过节点的 `dialer-proxy`。系统须能访问 KDC，且本机时间须与域保持同步。
+
+## macOS 系统服务
+
+macOS 的 GSSCred 默认按审计会话隔离凭据。通过 launchd 启动的 root 服务可能无法访问桌面用户已经取得的票据，即使同一核心在桌面会话中运行时能够认证。
+
+mihomo 仍先尝试当前进程的系统凭据。仅当 root 进程获取凭据时返回 `GSS_S_NO_CRED`，且未显式设置 `KRB5CCNAME` 或 `KRB5_CLIENT_KTNAME`，才尝试前台登录用户。HTTP 节点仍只需配置 `kerberos: true`，无需修改 Sparkle。
+
+此时 mihomo 调用系统 `/bin/launchctl asuser`，在前台用户的认证会话中启动自身的 `kerberos-helper` 子进程。助手确认用户未发生切换后，降权到该用户，再调用系统 GSS.framework。核心继续以原有权限处理网络连接；助手仅通过继承的匿名管道交换认证令牌，不导出票据缓存、不开放监听端口，也不修改系统 GSSCred 设置。
+
+每次握手重新选择前台用户并创建独立助手。助手在握手结束、连接取消或最多 30 秒后退出。没有前台登录用户、用户没有可用票据或会话切换失败时，连接返回错误；不会选择其他后台登录用户。快速用户切换后，新连接使用新的前台用户，已经建立的隧道不重新认证。
+
+该机制依赖 mihomo 可执行文件内置的助手入口。将 mihomo 作为库嵌入其他程序时，宿主需在启动时将 `kerberos-helper` 参数交给 `kerberos.RunHelper`，才能使用此功能。
 
 ## Linux 构建
 

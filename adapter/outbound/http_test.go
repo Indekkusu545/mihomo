@@ -115,7 +115,7 @@ func TestHttpKerberos(t *testing.T) {
 func httpWithTestKerberos(auth kerberos.Client) *Http {
 	return &Http{
 		option: &HttpOption{Kerberos: true, KerberosSPN: "HTTP/proxy.example", Headers: map[string]string{"X-Test": "kept"}},
-		newKerberosClient: func(spn string) (kerberos.Client, error) {
+		newKerberosClient: func(_ context.Context, spn string) (kerberos.Client, error) {
 			if spn != "HTTP/proxy.example" {
 				return nil, fmt.Errorf("wrong SPN: %s", spn)
 			}

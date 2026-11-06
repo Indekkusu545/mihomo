@@ -25,7 +25,7 @@ type Http struct {
 	pass              string
 	tlsConfig         *tls.Config
 	option            *HttpOption
-	newKerberosClient func(string) (kerberos.Client, error)
+	newKerberosClient func(context.Context, string) (kerberos.Client, error)
 }
 
 type HttpOption struct {
@@ -238,7 +238,7 @@ func NewHttp(option HttpOption) (*Http, error) {
 		pass:              option.Password,
 		tlsConfig:         tlsConfig,
 		option:            &option,
-		newKerberosClient: kerberos.NewClient,
+		newKerberosClient: kerberos.NewClientContext,
 	}
 	outbound.dialer = option.NewDialer(outbound.DialOptions())
 	return outbound, nil
