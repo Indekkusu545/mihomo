@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
 
 	N "github.com/metacubex/mihomo/common/net"
 	"github.com/metacubex/mihomo/component/ca"
+	"github.com/metacubex/mihomo/component/kerberos"
 	C "github.com/metacubex/mihomo/constant"
 
 	"github.com/metacubex/http"
@@ -19,10 +21,11 @@ import (
 
 type Http struct {
 	*Base
-	user      string
-	pass      string
-	tlsConfig *tls.Config
-	option    *HttpOption
+	user              string
+	pass              string
+	tlsConfig         *tls.Config
+	option            *HttpOption
+	newKerberosClient func(string) (kerberos.Client, error)
 }
 
 type HttpOption struct {
@@ -32,6 +35,8 @@ type HttpOption struct {
 	Port           int               `proxy:"port"`
 	UserName       string            `proxy:"username,omitempty"`
 	Password       string            `proxy:"password,omitempty"`
+	Kerberos       bool              `proxy:"kerberos,omitempty"`
+	KerberosSPN    string            `proxy:"kerberos-spn,omitempty"`
 	TLS            bool              `proxy:"tls,omitempty"`
 	SNI            string            `proxy:"sni,omitempty"`
 	SkipCertVerify bool              `proxy:"skip-cert-verify,omitempty"`
@@ -93,7 +98,32 @@ func (h *Http) shakeHandContext(ctx context.Context, c net.Conn, br *bufio.Reade
 		done := N.SetupContextForConn(ctx, c)
 		defer done(&err)
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if h.option.Kerberos {
+		// Native SSPI/GSS calls can block while contacting a KDC. The worker
+		// owns the security context until the native call returns; cancellation
+		// closes the connection and returns without releasing an in-use context.
+		result := make(chan error, 1)
+		go func() {
+			result <- h.kerberosHandshake(ctx, c, br, metadata)
+		}()
+		select {
+		case err := <-result:
+			return err
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	resp, err := h.connect(c, br, metadata, "")
+	if err != nil {
+		return err
+	}
+	return httpConnectError(resp)
+}
 
+func (h *Http) connect(c net.Conn, br *bufio.Reader, metadata *C.Metadata, authorization string) (*http.Response, error) {
 	addr := metadata.RemoteAddress()
 	HeaderString := "CONNECT " + addr + " HTTP/1.1\r\n"
 	tempHeaders := map[string]string{
@@ -106,7 +136,9 @@ func (h *Http) shakeHandContext(ctx context.Context, c net.Conn, br *bufio.Reade
 		tempHeaders[key] = value
 	}
 
-	if h.user != "" && h.pass != "" {
+	if authorization != "" {
+		tempHeaders["Proxy-Authorization"] = authorization
+	} else if !h.option.Kerberos && h.user != "" && h.pass != "" {
 		auth := h.user + ":" + h.pass
 		tempHeaders["Proxy-Authorization"] = "Basic " + base64.StdEncoding.EncodeToString([]byte(auth))
 	}
@@ -117,18 +149,13 @@ func (h *Http) shakeHandContext(ctx context.Context, c net.Conn, br *bufio.Reade
 
 	HeaderString += "\r\n"
 
-	_, err = c.Write([]byte(HeaderString))
-
-	if err != nil {
-		return err
+	if _, err := c.Write([]byte(HeaderString)); err != nil {
+		return nil, err
 	}
+	return http.ReadResponse(br, nil)
+}
 
-	resp, err := http.ReadResponse(br, nil)
-
-	if err != nil {
-		return err
-	}
-
+func httpConnectError(resp *http.Response) error {
 	if resp.StatusCode == http.StatusOK {
 		return nil
 	}
@@ -149,6 +176,27 @@ func (h *Http) shakeHandContext(ctx context.Context, c net.Conn, br *bufio.Reade
 }
 
 func NewHttp(option HttpOption) (*Http, error) {
+	if option.Kerberos {
+		if err := kerberos.CheckSupport(); err != nil {
+			return nil, err
+		}
+		if option.UserName != "" || option.Password != "" {
+			return nil, errors.New("HTTP Kerberos uses the system identity and cannot be combined with username/password")
+		}
+		for name := range option.Headers {
+			if strings.EqualFold(name, "Proxy-Authorization") {
+				return nil, errors.New("HTTP Kerberos cannot be combined with a Proxy-Authorization header")
+			}
+		}
+		if option.KerberosSPN == "" {
+			option.KerberosSPN = "HTTP/" + strings.TrimSuffix(strings.ToLower(option.Server), ".")
+		}
+		if err := kerberos.ValidateSPN(option.KerberosSPN); err != nil {
+			return nil, err
+		}
+	} else if option.KerberosSPN != "" {
+		return nil, errors.New("kerberos-spn requires kerberos: true")
+	}
 	var tlsConfig *tls.Config
 	if option.TLS {
 		sni := option.Server
@@ -183,10 +231,11 @@ func NewHttp(option HttpOption) (*Http, error) {
 			RoutingMark:  option.RoutingMark,
 			Prefer:       option.IPVersion,
 		}),
-		user:      option.UserName,
-		pass:      option.Password,
-		tlsConfig: tlsConfig,
-		option:    &option,
+		user:              option.UserName,
+		pass:              option.Password,
+		tlsConfig:         tlsConfig,
+		option:            &option,
+		newKerberosClient: kerberos.NewClient,
 	}
 	outbound.dialer = option.NewDialer(outbound.DialOptions())
 	return outbound, nil

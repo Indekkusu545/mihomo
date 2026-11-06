@@ -69,3 +69,7 @@ jobs:
 
       - name: Test with tag with_gvisor
         run: go test ./... -v -count=1 -tags "with_gvisor"
+
+      - name: Test with tag with_gssapi
+        if: runner.os == 'Linux'
+        run: go test ./component/kerberos ./adapter/outbound -v -count=1 -tags "with_gssapi"
