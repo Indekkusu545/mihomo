@@ -55,6 +55,7 @@ func TestHttpKerberos(t *testing.T) {
 				}
 			}
 			h := httpWithTestKerberos(auth)
+			h.option.KerberosMutualAuth = true
 			client, server := net.Pipe()
 			defer client.Close()
 			defer server.Close()
@@ -123,16 +124,63 @@ func httpWithTestKerberos(auth kerberos.Client) *Http {
 	}
 }
 
+func TestHttpKerberosOptionalMutualAuth(t *testing.T) {
+	for _, header := range []string{"", "Proxy-Authenticate: Negotiate\r\n"} {
+		t.Run(fmt.Sprintf("header=%q", header), func(t *testing.T) {
+			auth := &httpTestKerberosClient{closed: make(chan struct{}), step: func(token []byte) ([]byte, bool, error) {
+				if len(token) != 0 {
+					return nil, false, errors.New("unexpected server token")
+				}
+				return []byte("initial"), false, nil
+			}}
+			h := httpWithTestKerberos(auth)
+			client, server := net.Pipe()
+			defer client.Close()
+			defer server.Close()
+			result := make(chan error, 1)
+			go func() {
+				_, err := http.ReadRequest(bufio.NewReader(server))
+				if err == nil {
+					_, err = io.WriteString(server, "HTTP/1.1 200 Connection established\r\n"+header+"\r\ntunnel bytes")
+				}
+				result <- err
+			}()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			conn, err := h.StreamConnContext(ctx, client, &C.Metadata{Host: "target", DstPort: 443})
+			if err != nil {
+				t.Fatal(err)
+			}
+			data := make([]byte, len("tunnel bytes"))
+			if _, err := io.ReadFull(conn, data); err != nil {
+				t.Fatal(err)
+			}
+			if string(data) != "tunnel bytes" {
+				t.Fatalf("lost tunnel data: %q", data)
+			}
+			if err := <-result; err != nil {
+				t.Fatal(err)
+			}
+			<-auth.closed
+		})
+	}
+}
+
 func TestHttpKerberosFailures(t *testing.T) {
-	for _, tc := range []struct{ name, response, want string }{
-		{"basic only", "407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"x\"\r\nContent-Length: 0", "does not offer Negotiate"},
-		{"rejected", "407 Proxy Authentication Required\r\nProxy-Authenticate: Negotiate\r\nContent-Length: 0", "rejected system credentials"},
-		{"bad base64", "407 Proxy Authentication Required\r\nProxy-Authenticate: Negotiate !!!\r\nContent-Length: 0", "invalid base64"},
-		{"closed", "407 Proxy Authentication Required\r\nProxy-Authenticate: Negotiate YQ==\r\nConnection: close\r\nContent-Length: 0", "closed the connection"},
-		{"unframed", "407 Proxy Authentication Required\r\nProxy-Authenticate: Negotiate YQ==", "closed the connection"},
-		{"missing mutual auth", "200 Connection established", "did not complete mutual authentication"},
-		{"invalid server token", "200 Connection established\r\nProxy-Authenticate: Negotiate YQ==", "verify proxy token"},
-		{"method not allowed", "405 Method Not Allowed", "CONNECT method not allowed"},
+	for _, tc := range []struct {
+		name, response, want string
+		mutualAuth           bool
+	}{
+		{"basic only", "407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"x\"\r\nContent-Length: 0", "does not offer Negotiate", false},
+		{"rejected", "407 Proxy Authentication Required\r\nProxy-Authenticate: Negotiate\r\nContent-Length: 0", "rejected system credentials", false},
+		{"bad base64", "407 Proxy Authentication Required\r\nProxy-Authenticate: Negotiate !!!\r\nContent-Length: 0", "invalid base64", false},
+		{"bad final base64", "200 Connection established\r\nProxy-Authenticate: Negotiate !!!", "invalid base64", false},
+		{"closed", "407 Proxy Authentication Required\r\nProxy-Authenticate: Negotiate YQ==\r\nConnection: close\r\nContent-Length: 0", "closed the connection", false},
+		{"unframed", "407 Proxy Authentication Required\r\nProxy-Authenticate: Negotiate YQ==", "closed the connection", false},
+		{"missing mutual auth", "200 Connection established", "did not complete mutual authentication", true},
+		{"empty mutual auth", "200 Connection established\r\nProxy-Authenticate: Negotiate", "did not complete mutual authentication", true},
+		{"invalid server token", "200 Connection established\r\nProxy-Authenticate: Negotiate YQ==", "verify proxy token", false},
+		{"method not allowed", "405 Method Not Allowed", "CONNECT method not allowed", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			auth := &httpTestKerberosClient{closed: make(chan struct{}), step: func(token []byte) ([]byte, bool, error) {
@@ -142,6 +190,7 @@ func TestHttpKerberosFailures(t *testing.T) {
 				return []byte("first"), false, nil
 			}}
 			h := httpWithTestKerberos(auth)
+			h.option.KerberosMutualAuth = tc.mutualAuth
 			client, server := net.Pipe()
 			defer client.Close()
 			defer server.Close()
@@ -158,6 +207,58 @@ func TestHttpKerberosFailures(t *testing.T) {
 			}
 			<-auth.closed
 		})
+	}
+}
+
+func TestHttpKerberosFinalToken(t *testing.T) {
+	for _, tc := range []struct {
+		name, output, want string
+		complete           bool
+	}{
+		{"complete", "", "", true},
+		{"incomplete", "", "did not complete mutual authentication", false},
+		{"pending token", "pending", "before negotiation finished", false},
+		{"complete with pending token", "pending", "before negotiation finished", true},
+	} {
+		for _, mutualAuth := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/mutual=%t", tc.name, mutualAuth), func(t *testing.T) {
+				calls := 0
+				auth := &httpTestKerberosClient{closed: make(chan struct{}), step: func(token []byte) ([]byte, bool, error) {
+					calls++
+					if calls == 1 && len(token) == 0 {
+						return []byte("initial"), false, nil
+					}
+					if calls != 2 || string(token) != "final" {
+						return nil, false, errors.New("unexpected server token")
+					}
+					return []byte(tc.output), tc.complete, nil
+				}}
+				h := httpWithTestKerberos(auth)
+				h.option.KerberosMutualAuth = mutualAuth
+				client, server := net.Pipe()
+				defer client.Close()
+				defer server.Close()
+				go func() {
+					if _, err := http.ReadRequest(bufio.NewReader(server)); err == nil {
+						io.WriteString(server, "HTTP/1.1 200 Connection established\r\nProxy-Authenticate: Negotiate ZmluYWw=\r\n\r\n")
+					}
+				}()
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				_, err := h.StreamConnContext(ctx, client, &C.Metadata{Host: "target", DstPort: 443})
+				if tc.want == "" {
+					if err != nil {
+						t.Fatal(err)
+					}
+				} else if err == nil || !strings.Contains(err.Error(), tc.want) {
+					t.Fatalf("got %v, want %q", err, tc.want)
+				}
+				<-auth.closed
+				if calls != 2 {
+					t.Fatalf("got %d authentication calls", calls)
+				}
+			})
+		}
 	}
 }
 
@@ -237,7 +338,8 @@ func TestHttpKerberosOptions(t *testing.T) {
 	}
 	decoder := structure.NewDecoder(structure.Option{TagName: "proxy"})
 	var option HttpOption
-	if err := decoder.Decode(map[string]any{"name": "system", "server": "Proxy.Example.", "port": 8080, "kerberos": true}, &option); err != nil {
+	config := map[string]any{"name": "system", "server": "Proxy.Example.", "port": 8080, "kerberos": true}
+	if err := decoder.Decode(config, &option); err != nil {
 		t.Fatal(err)
 	}
 	h, err := NewHttp(option)
@@ -247,6 +349,13 @@ func TestHttpKerberosOptions(t *testing.T) {
 	if h.option.KerberosSPN != "HTTP/proxy.example" {
 		t.Fatal(h.option.KerberosSPN)
 	}
+	if h.option.KerberosMutualAuth {
+		t.Fatal("mutual authentication should be optional by default")
+	}
+	config["kerberos-mutual-auth"] = true
+	if err := decoder.Decode(config, &option); err != nil {
+		t.Fatal(err)
+	}
 	option.KerberosSPN = "HTTP/registered.example@EXAMPLE.COM"
 	h, err = NewHttp(option)
 	if err != nil {
@@ -254,6 +363,9 @@ func TestHttpKerberosOptions(t *testing.T) {
 	}
 	if h.option.KerberosSPN != option.KerberosSPN {
 		t.Fatal("explicit SPN changed")
+	}
+	if !h.option.KerberosMutualAuth {
+		t.Fatal("mutual authentication option was not decoded")
 	}
 	for _, modify := range []func(*HttpOption){
 		func(o *HttpOption) { o.UserName = "user" },
@@ -268,6 +380,13 @@ func TestHttpKerberosOptions(t *testing.T) {
 		if _, err := NewHttp(invalid); err == nil {
 			t.Fatalf("accepted invalid options: %+v", invalid)
 		}
+	}
+}
+
+func TestHttpKerberosMutualAuthRequiresKerberos(t *testing.T) {
+	_, err := NewHttp(HttpOption{Server: "proxy.example", Port: 8080, KerberosMutualAuth: true})
+	if err == nil || !strings.Contains(err.Error(), "kerberos-mutual-auth requires kerberos: true") {
+		t.Fatalf("got %v", err)
 	}
 }
 

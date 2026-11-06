@@ -66,7 +66,10 @@ func (h *Http) kerberosHandshake(ctx context.Context, conn net.Conn, br *bufio.R
 					return errors.New("HTTP Kerberos: proxy established tunnel before negotiation finished")
 				}
 			}
-			if !complete {
+			// Some proxies accept the client token but omit the final token.
+			// Allow this unless mutual authentication is required, but always
+			// require a supplied proxy token to finish the security context.
+			if !complete && (h.option.KerberosMutualAuth || len(challenge) > 0) {
 				return errors.New("HTTP Kerberos: proxy did not complete mutual authentication")
 			}
 			return nil

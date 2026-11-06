@@ -30,21 +30,22 @@ type Http struct {
 
 type HttpOption struct {
 	BasicOption
-	Name           string            `proxy:"name"`
-	Server         string            `proxy:"server"`
-	Port           int               `proxy:"port"`
-	UserName       string            `proxy:"username,omitempty"`
-	Password       string            `proxy:"password,omitempty"`
-	Kerberos       bool              `proxy:"kerberos,omitempty"`
-	KerberosSPN    string            `proxy:"kerberos-spn,omitempty"`
-	TLS            bool              `proxy:"tls,omitempty"`
-	SNI            string            `proxy:"sni,omitempty"`
-	SkipCertVerify bool              `proxy:"skip-cert-verify,omitempty"`
-	NameCertVerify string            `proxy:"name-cert-verify,omitempty"`
-	Fingerprint    string            `proxy:"fingerprint,omitempty"`
-	Certificate    string            `proxy:"certificate,omitempty"`
-	PrivateKey     string            `proxy:"private-key,omitempty"`
-	Headers        map[string]string `proxy:"headers,omitempty"`
+	Name               string            `proxy:"name"`
+	Server             string            `proxy:"server"`
+	Port               int               `proxy:"port"`
+	UserName           string            `proxy:"username,omitempty"`
+	Password           string            `proxy:"password,omitempty"`
+	Kerberos           bool              `proxy:"kerberos,omitempty"`
+	KerberosSPN        string            `proxy:"kerberos-spn,omitempty"`
+	KerberosMutualAuth bool              `proxy:"kerberos-mutual-auth,omitempty"`
+	TLS                bool              `proxy:"tls,omitempty"`
+	SNI                string            `proxy:"sni,omitempty"`
+	SkipCertVerify     bool              `proxy:"skip-cert-verify,omitempty"`
+	NameCertVerify     string            `proxy:"name-cert-verify,omitempty"`
+	Fingerprint        string            `proxy:"fingerprint,omitempty"`
+	Certificate        string            `proxy:"certificate,omitempty"`
+	PrivateKey         string            `proxy:"private-key,omitempty"`
+	Headers            map[string]string `proxy:"headers,omitempty"`
 }
 
 // StreamConnContext implements C.ProxyAdapter
@@ -196,6 +197,8 @@ func NewHttp(option HttpOption) (*Http, error) {
 		}
 	} else if option.KerberosSPN != "" {
 		return nil, errors.New("kerberos-spn requires kerberos: true")
+	} else if option.KerberosMutualAuth {
+		return nil, errors.New("kerberos-mutual-auth requires kerberos: true")
 	}
 	var tlsConfig *tls.Config
 	if option.TLS {

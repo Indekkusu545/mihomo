@@ -10,12 +10,15 @@ proxies:
     port: 8080
     kerberos: true
     # kerberos-spn: HTTP/proxy.example.com
+    # kerberos-mutual-auth: true
     # tls: true
 ```
 
 `kerberos` 默认为 `false`。启用后不能同时配置 `username`、`password` 或自定义 `Proxy-Authorization` 请求头。认证失败会返回错误，不回退到 Basic 或 NTLM。
 
 `kerberos-spn` 为可选的服务主体名称（SPN），默认为 `HTTP/<server>`。默认值不包含代理端口，且不受目标网站地址或 `sni` 影响。使用代理的完整域名；如果通过 IP 地址或别名连接，需将 SPN 指向代理实际注册的主体。需要指定 realm 时可使用 `HTTP/proxy.example.com@EXAMPLE.COM`。
+
+`kerberos-mutual-auth` 默认为 `false`，兼容在 CONNECT 成功响应中省略最终认证令牌的代理。缺少最终令牌时，客户端无法验证代理的 Kerberos 身份。设为 `true` 可要求完成双向认证，否则拒绝连接；此选项要求启用 `kerberos`。
 
 ## 系统身份
 
@@ -43,8 +46,10 @@ Linux 运行环境需提供 `libgssapi_krb5.so.2`、`libgssapi.so.3` 或 `libgss
 
 ## 认证行为
 
-每个 CONNECT 连接独立创建认证上下文，并发送系统生成的 SPNEGO 令牌。代理返回 `407` 和后续 Negotiate 令牌时，在同一连接上继续认证，最多执行 8 轮。代理返回 `200` 时，客户端验证最终令牌和双向认证状态后才开放隧道。
+每个 CONNECT 连接独立创建认证上下文，并发送系统生成的 SPNEGO 令牌。代理返回 `407` 和后续 Negotiate 令牌时，在同一连接上继续认证，最多执行 8 轮。客户端始终向系统认证库请求双向认证。
 
-代理必须支持 Kerberos/Negotiate，并在需要继续认证时保持连接。缺少系统凭据、SPN 不匹配、票据过期、缺失最终认证令牌或代理拒绝身份，均会导致连接失败。系统认证调用阻塞时，连接的取消或超时仍会返回；该系统调用返回后释放其认证上下文。
+代理返回 `200` 且包含 Negotiate 令牌时，无论 `kerberos-mutual-auth` 如何配置，客户端都必须验证令牌并确认认证完成，才会开放隧道。代理未返回令牌时，默认允许建立隧道；启用 `kerberos-mutual-auth` 后，认证尚未完成则返回 `proxy did not complete mutual authentication`。
+
+代理必须支持 Kerberos/Negotiate，并在需要继续认证时保持连接。缺少系统凭据、SPN 不匹配、票据过期、最终令牌无效或代理拒绝身份，均会导致连接失败。系统认证调用阻塞时，连接的取消或超时仍会返回；该系统调用返回后释放其认证上下文。
 
 实现依据：[Microsoft SSPI](https://learn.microsoft.com/en-us/windows/win32/secauthn/initializesecuritycontext--kerberos)、[MIT GSS-API](https://web.mit.edu/kerberos/krb5-latest/doc/appdev/gssapi.html)。
